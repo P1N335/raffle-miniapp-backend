@@ -1,0 +1,59 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id         String        @id @default(cuid())
+  telegramId String        @unique
+  username   String?
+  firstName  String?
+  lastName   String?
+  photoUrl   String?
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+
+  raffleEntries RaffleEntry[]
+  raffleWins    RaffleRound[] @relation("RaffleWinner")
+}
+
+model RaffleRound {
+  id             String        @id @default(cuid())
+  status         RaffleStatus  @default(BETTING)
+  startedAt      DateTime      @default(now())
+  bettingEndsAt  DateTime
+  spinningEndsAt DateTime?
+  finishedAt     DateTime?
+  totalPool      Int           @default(0)
+  winnerUserId   String?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  winner  User?          @relation("RaffleWinner", fields: [winnerUserId], references: [id])
+  entries RaffleEntry[]
+
+  @@index([status])
+}
+
+model RaffleEntry {
+  id        String      @id @default(cuid())
+  roundId   String
+  userId    String
+  amount    Int
+  createdAt DateTime    @default(now())
+
+  round     RaffleRound @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([roundId])
+  @@index([userId])
+}
+
+enum RaffleStatus {
+  BETTING
+  SPINNING
+  FINISHED
+}
