@@ -1,56 +1,83 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { parse, validate } from '@tma.js/init-data-node';
 
 @Injectable()
 export class AuthService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async authWithTelegram(initData: string) {
-    const params = new URLSearchParams(initData);
-    const userRaw = params.get('user');
+  async authWithTelegram(initDataRaw: string) {
+    const botToken = process.env.TELEGRAM_BOT_TOKEN;
 
-    if (!userRaw) {
+    if (!botToken) {
+      throw new BadRequestException('TELEGRAM_BOT_TOKEN is not configured');
+    }
+
+    try {
+      validate(initDataRaw, botToken);
+    } catch {
+      throw new UnauthorizedException('Invalid Telegram initData');
+    }
+
+    const initData = parse(initDataRaw);
+
+    if (!initData.user) {
       throw new BadRequestException('Telegram user not found in initData');
     }
 
-    let telegramUser: {
-      id: number;
-      username?: string;
-      first_name?: string;
-      last_name?: string;
-      photo_url?: string;
-    };
+    const tgUser = initData.user;
 
-    try {
-      telegramUser = JSON.parse(userRaw);
-    } catch {
-      throw new BadRequestException('Invalid Telegram user payload');
-    }
+    const username =
+      typeof tgUser.username === 'string' ? tgUser.username : null;
 
-    return this.prisma.user.upsert({
+    const firstName =
+      typeof tgUser.firstName === 'string' ? tgUser.firstName : null;
+
+    const lastName =
+      typeof tgUser.lastName === 'string' ? tgUser.lastName : null;
+
+    const photoUrl =
+      typeof tgUser.photoUrl === 'string' ? tgUser.photoUrl : null;
+
+    const user = await this.prisma.user.upsert({
       where: {
-        telegramId: telegramUser.id.toString(),
+        telegramId: String(tgUser.id),
       },
       update: {
-        username: telegramUser.username ?? null,
-        firstName: telegramUser.first_name ?? null,
-        lastName: telegramUser.last_name ?? null,
-        photoUrl: telegramUser.photo_url ?? null,
+        username,
+        firstName,
+        lastName,
+        photoUrl,
       },
       create: {
-        telegramId: telegramUser.id.toString(),
-        username: telegramUser.username ?? null,
-        firstName: telegramUser.first_name ?? null,
-        lastName: telegramUser.last_name ?? null,
-        photoUrl: telegramUser.photo_url ?? null,
+        telegramId: String(tgUser.id),
+        username,
+        firstName,
+        lastName,
+        photoUrl,
       },
     });
+
+    return {
+      id: user.id,
+      telegramId: user.telegramId,
+      username: user.username,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      photoUrl: user.photoUrl,
+    };
   }
 
   async getMeByTelegramId(telegramId: string) {
     return this.prisma.user.findUnique({
-      where: {
-        telegramId,
+      where: { telegramId },
+      select: {
+        id: true,
+        telegramId: true,
+        username: true,
+        firstName: true,
+        lastName: true,
+        photoUrl: true,
       },
     });
   }
