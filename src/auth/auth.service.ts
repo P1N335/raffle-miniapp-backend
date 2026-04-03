@@ -1,9 +1,16 @@
-import { BadRequestException, Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { parse, validate } from '@tma.js/init-data-node';
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(private readonly prisma: PrismaService) {}
 
   async authWithTelegram(initDataRaw: string) {
@@ -15,7 +22,12 @@ export class AuthService {
 
     try {
       validate(initDataRaw, botToken);
-    } catch {
+    } catch (error) {
+      this.logger.warn(
+        `Telegram initData validation failed: ${
+          error instanceof Error ? error.message : 'Unknown error'
+        }`,
+      );
       throw new UnauthorizedException('Invalid Telegram initData');
     }
 
