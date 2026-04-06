@@ -18,6 +18,7 @@ model User {
 
   raffleEntries RaffleEntry[]
   raffleWins    RaffleRound[] @relation("RaffleWinner")
+  caseOpenings  CaseOpening[]
 }
 
 model RaffleRound {
@@ -52,8 +53,36 @@ model RaffleEntry {
   @@index([userId])
 }
 
+model CaseOpening {
+  id               String           @id @default(cuid())
+  caseSlug         String
+  caseName         String
+  priceTon         Int
+  rewardId         String
+  rewardName       String
+  rewardImage      String
+  rewardRarity     CaseRewardRarity
+  rewardChance     Int
+  rewardValueLabel String
+  userId           String?
+  createdAt        DateTime         @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([caseSlug])
+  @@index([userId])
+  @@index([createdAt])
+}
+
 enum RaffleStatus {
   BETTING
   SPINNING
   FINISHED
+}
+
+enum CaseRewardRarity {
+  COMMON
+  RARE
+  EPIC
+  LEGENDARY
 }

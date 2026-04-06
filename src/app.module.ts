@@ -5,6 +5,7 @@ import { PrismaModule } from './prisma/prisma.module';
 import { UsersModule } from './users/users.module';
 import { RaffleModule } from './raffle/raffle.module';
 import { AuthModule } from './auth/auth.module';
+import { CasesModule } from './cases/cases.module';
 
 const envFilePaths = [
   resolve(process.cwd(), '.env'),
@@ -22,6 +23,7 @@ const envFilePaths = [
     UsersModule,
     RaffleModule,
     AuthModule,
+    CasesModule,
   ],
 })
 export class AppModule {}
