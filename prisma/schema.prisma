@@ -7,18 +7,23 @@ datasource db {
 }
 
 model User {
-  id         String        @id @default(cuid())
-  telegramId String        @unique
-  username   String?
-  firstName  String?
-  lastName   String?
-  photoUrl   String?
-  createdAt  DateTime      @default(now())
-  updatedAt  DateTime      @updatedAt
+  id                   String            @id @default(cuid())
+  telegramId           String            @unique
+  username             String?
+  firstName            String?
+  lastName             String?
+  photoUrl             String?
+  tonWalletAddress     String?           @unique
+  tonWalletAddressRaw  String?           @unique
+  tonWalletNetwork     TonNetwork?
+  tonWalletConnectedAt DateTime?
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
 
-  raffleEntries RaffleEntry[]
-  raffleWins    RaffleRound[] @relation("RaffleWinner")
-  caseOpenings  CaseOpening[]
+  raffleEntries      RaffleEntry[]
+  raffleWins         RaffleRound[]      @relation("RaffleWinner")
+  caseOpenings       CaseOpening[]
+  casePaymentIntents CasePaymentIntent[]
 }
 
 model RaffleRound {
@@ -53,23 +58,124 @@ model RaffleEntry {
   @@index([userId])
 }
 
+model GiftType {
+  id                 String           @id
+  telegramGiftTypeId String?
+  name               String
+  description        String?
+  image              String
+  rarity             CaseRewardRarity
+  estimatedValueTon  Int
+  valueLabel         String
+  accent             String
+  textColor          String
+  isActive           Boolean          @default(true)
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  caseDrops    CaseDrop[]
+  caseOpenings CaseOpening[]
+}
+
+model CaseDefinition {
+  id              String            @id
+  slug            String            @unique
+  name            String
+  tagline         String
+  shortDescription String
+  priceTon        Int
+  image           String
+  badgeGradient   String
+  buttonGradient  String
+  surfaceTint     String
+  sortOrder       Int               @default(0)
+  isActive        Boolean           @default(true)
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  drops              CaseDrop[]
+  caseOpenings       CaseOpening[]
+  casePaymentIntents CasePaymentIntent[]
+
+  @@index([slug])
+  @@index([isActive, sortOrder])
+}
+
+model CaseDrop {
+  id         String         @id
+  caseId     String
+  giftTypeId String
+  chance     Int
+  sortOrder  Int            @default(0)
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+
+  case        CaseDefinition @relation(fields: [caseId], references: [id], onDelete: Restrict)
+  giftType    GiftType       @relation(fields: [giftTypeId], references: [id], onDelete: Restrict)
+  caseOpenings CaseOpening[]
+
+  @@unique([caseId, giftTypeId])
+  @@index([caseId, sortOrder])
+  @@index([giftTypeId])
+}
+
+model CasePaymentIntent {
+  id                  String            @id @default(cuid())
+  userId              String?
+  caseId              String
+  caseSlug            String
+  caseName            String
+  walletAddress       String
+  walletAddressRaw    String
+  recipientAddress    String
+  recipientAddressRaw String
+  amountTon           Int
+  amountNano          String
+  reference           String            @unique
+  status              CasePaymentStatus @default(PENDING)
+  submittedBoc        String?
+  transactionHash     String?
+  transactionLt       String?
+  validUntil          DateTime
+  confirmedAt         DateTime?
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+
+  user    User?           @relation(fields: [userId], references: [id], onDelete: SetNull)
+  case    CaseDefinition  @relation(fields: [caseId], references: [id], onDelete: Restrict)
+  opening CaseOpening?
+
+  @@index([userId])
+  @@index([caseId])
+  @@index([status, validUntil])
+  @@index([walletAddressRaw])
+}
+
 model CaseOpening {
-  id               String           @id @default(cuid())
-  caseSlug         String
-  caseName         String
-  priceTon         Int
-  rewardId         String
-  rewardName       String
-  rewardImage      String
-  rewardRarity     CaseRewardRarity
-  rewardChance     Int
-  rewardValueLabel String
-  userId           String?
-  createdAt        DateTime         @default(now())
+  id                    String            @id @default(cuid())
+  userId                String?
+  caseId                String
+  caseDropId            String
+  giftTypeId            String
+  paymentIntentId       String            @unique
+  status                CaseOpeningStatus @default(OWNED)
+  telegramOwnedGiftId   String?
+  withdrawFailureReason String?
+  soldAmountTon         Int?
+  soldAt                DateTime?
+  withdrawalRequestedAt DateTime?
+  withdrawnAt           DateTime?
+  createdAt             DateTime          @default(now())
 
-  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+  user          User?             @relation(fields: [userId], references: [id], onDelete: SetNull)
+  case          CaseDefinition    @relation(fields: [caseId], references: [id], onDelete: Restrict)
+  caseDrop      CaseDrop          @relation(fields: [caseDropId], references: [id], onDelete: Restrict)
+  giftType      GiftType          @relation(fields: [giftTypeId], references: [id], onDelete: Restrict)
+  paymentIntent CasePaymentIntent @relation(fields: [paymentIntentId], references: [id], onDelete: Cascade)
 
-  @@index([caseSlug])
+  @@index([caseId])
+  @@index([caseDropId])
+  @@index([giftTypeId])
   @@index([userId])
   @@index([createdAt])
 }
@@ -85,4 +191,24 @@ enum CaseRewardRarity {
   RARE
   EPIC
   LEGENDARY
+}
+
+enum CasePaymentStatus {
+  PENDING
+  SUBMITTED
+  CONFIRMED
+  EXPIRED
+  FAILED
+}
+
+enum TonNetwork {
+  MAINNET
+  TESTNET
+}
+
+enum CaseOpeningStatus {
+  OWNED
+  SOLD
+  WITHDRAW_PENDING
+  WITHDRAWN
 }

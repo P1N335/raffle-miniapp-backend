@@ -1,7 +1,7 @@
 import { IsOptional, IsString } from 'class-validator';
 
-export class OpenCaseDto {
+export class CompleteWithdrawalDto {
   @IsOptional()
   @IsString()
-  userId?: string;
+  telegramOwnedGiftId?: string;
 }

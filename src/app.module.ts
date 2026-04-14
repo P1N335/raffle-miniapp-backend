@@ -6,6 +6,7 @@ import { UsersModule } from './users/users.module';
 import { RaffleModule } from './raffle/raffle.module';
 import { AuthModule } from './auth/auth.module';
 import { CasesModule } from './cases/cases.module';
+import { WithdrawalsModule } from './withdrawals/withdrawals.module';
 
 const envFilePaths = [
   resolve(process.cwd(), '.env'),
@@ -24,6 +25,7 @@ const envFilePaths = [
     RaffleModule,
     AuthModule,
     CasesModule,
+    WithdrawalsModule,
   ],
 })
 export class AppModule {}
