@@ -24,6 +24,10 @@ model User {
   raffleWins         RaffleRound[]      @relation("RaffleWinner")
   caseOpenings       CaseOpening[]
   casePaymentIntents CasePaymentIntent[]
+  createdCoinflipRooms CoinflipRoom[]   @relation("CoinflipCreator")
+  joinedCoinflipRooms  CoinflipRoom[]   @relation("CoinflipOpponent")
+  wonCoinflipRooms     CoinflipRoom[]   @relation("CoinflipWinner")
+  coinflipRoomItems    CoinflipRoomItem[]
 }
 
 model RaffleRound {
@@ -75,6 +79,7 @@ model GiftType {
 
   caseDrops    CaseDrop[]
   caseOpenings CaseOpening[]
+  coinflipRoomItems CoinflipRoomItem[]
 }
 
 model CaseDefinition {
@@ -172,12 +177,61 @@ model CaseOpening {
   caseDrop      CaseDrop          @relation(fields: [caseDropId], references: [id], onDelete: Restrict)
   giftType      GiftType          @relation(fields: [giftTypeId], references: [id], onDelete: Restrict)
   paymentIntent CasePaymentIntent @relation(fields: [paymentIntentId], references: [id], onDelete: Cascade)
+  coinflipRoomItems CoinflipRoomItem[]
 
   @@index([caseId])
   @@index([caseDropId])
   @@index([giftTypeId])
   @@index([userId])
   @@index([createdAt])
+}
+
+model CoinflipRoom {
+  id              String             @id @default(cuid())
+  roomCode        String             @unique
+  status          CoinflipRoomStatus @default(OPEN)
+  creatorUserId   String
+  opponentUserId  String?
+  winnerUserId    String?
+  creatorTotalTon Int
+  opponentTotalTon Int?
+  creatorReadyAt  DateTime
+  opponentReadyAt DateTime?
+  finishedAt      DateTime?
+  cancelledAt     DateTime?
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  creator  User              @relation("CoinflipCreator", fields: [creatorUserId], references: [id], onDelete: Cascade)
+  opponent User?             @relation("CoinflipOpponent", fields: [opponentUserId], references: [id], onDelete: SetNull)
+  winner   User?             @relation("CoinflipWinner", fields: [winnerUserId], references: [id], onDelete: SetNull)
+  items    CoinflipRoomItem[]
+
+  @@index([status, createdAt])
+  @@index([creatorUserId, status])
+  @@index([opponentUserId])
+  @@index([winnerUserId])
+}
+
+model CoinflipRoomItem {
+  id                String       @id @default(cuid())
+  roomId            String
+  userId            String
+  openingId         String
+  giftTypeId        String
+  seat              CoinflipSeat
+  estimatedValueTon Int
+  createdAt         DateTime     @default(now())
+
+  room     CoinflipRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user     User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  opening  CaseOpening  @relation(fields: [openingId], references: [id], onDelete: Restrict)
+  giftType GiftType     @relation(fields: [giftTypeId], references: [id], onDelete: Restrict)
+
+  @@unique([roomId, openingId])
+  @@index([roomId, seat])
+  @@index([openingId])
+  @@index([userId])
 }
 
 enum RaffleStatus {
@@ -208,7 +262,19 @@ enum TonNetwork {
 
 enum CaseOpeningStatus {
   OWNED
+  IN_COINFLIP
   SOLD
   WITHDRAW_PENDING
   WITHDRAWN
+}
+
+enum CoinflipRoomStatus {
+  OPEN
+  FINISHED
+  CANCELLED
+}
+
+enum CoinflipSeat {
+  CREATOR
+  OPPONENT
 }
