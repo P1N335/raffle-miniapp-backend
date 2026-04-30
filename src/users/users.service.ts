@@ -46,6 +46,7 @@ export class UsersService {
         firstName: true,
         lastName: true,
         photoUrl: true,
+        balanceTon: true,
         tonWalletAddress: true,
         tonWalletNetwork: true,
         tonWalletConnectedAt: true,
@@ -98,6 +99,7 @@ export class UsersService {
     return {
       user,
       summary: {
+        balanceTon: user.balanceTon,
         totalWonTon,
         totalItemsWon: openings.length,
         activeInventoryCount: activeInventory.length,
@@ -108,6 +110,25 @@ export class UsersService {
       },
       inventory: activeInventory.map((opening) => this.mapInventoryItem(opening)),
       openingHistory: openings.map((opening) => this.mapHistoryEntry(opening)),
+    };
+  }
+
+  async getBalance(userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        balanceTon: true,
+      },
+    });
+
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    return {
+      userId: user.id,
+      balanceTon: user.balanceTon,
     };
   }
 
@@ -150,17 +171,28 @@ export class UsersService {
       throw new BadRequestException('Only owned items can be sold');
     }
 
-    const updatedOpening = await this.prisma.caseOpening.update({
-      where: { id: opening.id },
-      data: {
-        status: CaseOpeningStatus.SOLD,
-        soldAmountTon: opening.giftType.estimatedValueTon,
-        soldAt: new Date(),
-      },
-      include: {
-        case: true,
-        giftType: true,
-      },
+    const updatedOpening = await this.prisma.$transaction(async (tx) => {
+      await tx.user.update({
+        where: { id: userId },
+        data: {
+          balanceTon: {
+            increment: opening.giftType.estimatedValueTon,
+          },
+        },
+      });
+
+      return tx.caseOpening.update({
+        where: { id: opening.id },
+        data: {
+          status: CaseOpeningStatus.SOLD,
+          soldAmountTon: opening.giftType.estimatedValueTon,
+          soldAt: new Date(),
+        },
+        include: {
+          case: true,
+          giftType: true,
+        },
+      });
     });
 
     return this.mapInventoryItem(updatedOpening);

@@ -9,6 +9,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import {
   CasePaymentStatus,
+  CasePaymentSource,
   CaseRewardRarity,
   Prisma,
   TonNetwork,
@@ -175,6 +176,7 @@ export class CasesService implements OnModuleInit {
         caseId: caseItem.id,
         caseSlug: caseItem.slug,
         caseName: caseItem.name,
+        paymentSource: CasePaymentSource.TON_WALLET,
         walletAddress: normalizedWallet.userFriendly,
         walletAddressRaw: normalizedWallet.raw,
         recipientAddress: recipientAddress.userFriendly,
@@ -199,6 +201,143 @@ export class CasesService implements OnModuleInit {
         ],
       },
     };
+  }
+
+  async openWithBalance(slug: string, userId: string) {
+    return this.prisma.$transaction(async (tx) => {
+      const caseItem = await tx.caseDefinition.findUnique({
+        where: { slug },
+        include: {
+          drops: {
+            include: {
+              giftType: true,
+            },
+            orderBy: {
+              sortOrder: 'asc',
+            },
+          },
+        },
+      });
+
+      if (!caseItem || !caseItem.isActive) {
+        throw new NotFoundException('Case not found');
+      }
+
+      const user = await tx.user.findUnique({
+        where: { id: userId },
+        select: {
+          id: true,
+          balanceTon: true,
+        },
+      });
+
+      if (!user) {
+        throw new NotFoundException('User not found');
+      }
+
+      if (user.balanceTon < caseItem.priceTon) {
+        throw new BadRequestException(
+          `You need at least ${caseItem.priceTon} TON on your internal balance`,
+        );
+      }
+
+      if (caseItem.drops.length === 0) {
+        throw new InternalServerErrorException(
+          'Case catalog is not ready for opening',
+        );
+      }
+
+      const amountNano = (BigInt(caseItem.priceTon) * TON_NANO).toString();
+      const paymentIntentId = randomUUID();
+      const reference = `balance:${paymentIntentId}`;
+      const winningDrop = pickWeightedDrop(caseItem.drops);
+
+      await tx.user.update({
+        where: { id: userId },
+        data: {
+          balanceTon: {
+            decrement: caseItem.priceTon,
+          },
+        },
+      });
+
+      await tx.casePaymentIntent.create({
+        data: {
+          id: paymentIntentId,
+          userId,
+          caseId: caseItem.id,
+          caseSlug: caseItem.slug,
+          caseName: caseItem.name,
+          paymentSource: CasePaymentSource.INTERNAL_BALANCE,
+          walletAddress: 'internal-balance',
+          walletAddressRaw: `internal-balance:${userId}`,
+          recipientAddress: 'internal-balance',
+          recipientAddressRaw: 'internal-balance',
+          amountTon: caseItem.priceTon,
+          amountNano,
+          reference,
+          status: CasePaymentStatus.CONFIRMED,
+          validUntil: new Date(),
+          confirmedAt: new Date(),
+        },
+      });
+
+      const opening = await tx.caseOpening.create({
+        data: {
+          userId,
+          caseId: caseItem.id,
+          caseDropId: winningDrop.id,
+          giftTypeId: winningDrop.giftType.id,
+          paymentIntentId,
+        },
+      });
+
+      const updatedUser = await tx.user.findUnique({
+        where: { id: userId },
+        select: {
+          balanceTon: true,
+        },
+      });
+
+      return {
+        paymentIntent: {
+          id: paymentIntentId,
+          caseId: caseItem.id,
+          caseSlug: caseItem.slug,
+          caseName: caseItem.name,
+          paymentSource: 'internal_balance',
+          walletAddress: 'internal-balance',
+          recipientAddress: 'internal-balance',
+          amountTon: caseItem.priceTon,
+          amountNano,
+          reference,
+          status: 'confirmed',
+          validUntil: new Date(),
+          confirmedAt: new Date(),
+          createdAt: new Date(),
+        },
+        opening: {
+          id: opening.id,
+          userId,
+          createdAt: opening.createdAt,
+          caseId: caseItem.id,
+          caseDropId: winningDrop.id,
+          giftTypeId: winningDrop.giftType.id,
+        },
+        case: {
+          id: caseItem.id,
+          slug: caseItem.slug,
+          name: caseItem.name,
+          priceTon: caseItem.priceTon,
+          image: caseItem.image,
+          badgeGradient: caseItem.badgeGradient,
+          buttonGradient: caseItem.buttonGradient,
+          surfaceTint: caseItem.surfaceTint,
+        },
+        reward: this.mapRewardDrop(winningDrop),
+        balanceTon: updatedUser?.balanceTon ?? 0,
+      };
+    });
   }
 
   async submitPaymentIntent(intentId: string, boc?: string) {
@@ -480,6 +619,7 @@ export class CasesService implements OnModuleInit {
       caseId: paymentIntent.caseId,
       caseSlug: paymentIntent.caseSlug,
       caseName: paymentIntent.caseName,
+      paymentSource: paymentIntent.paymentSource.toLowerCase(),
       walletAddress: paymentIntent.walletAddress,
       recipientAddress: paymentIntent.recipientAddress,
       amountTon: paymentIntent.amountTon,

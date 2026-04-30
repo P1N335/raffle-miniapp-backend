@@ -20,6 +20,11 @@ export class UsersController {
     return this.usersService.getProfile(userId);
   }
 
+  @Get(':userId/balance')
+  async getBalance(@Param('userId') userId: string) {
+    return this.usersService.getBalance(userId);
+  }
+
   @Get(':userId/inventory/:openingId')
   async getInventoryItem(
     @Param('userId') userId: string,

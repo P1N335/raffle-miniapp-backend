@@ -13,6 +13,7 @@ model User {
   firstName            String?
   lastName             String?
   photoUrl             String?
+  balanceTon           Int               @default(0)
   tonWalletAddress     String?           @unique
   tonWalletAddressRaw  String?           @unique
   tonWalletNetwork     TonNetwork?
@@ -130,6 +131,7 @@ model CasePaymentIntent {
   caseId              String
   caseSlug            String
   caseName            String
+  paymentSource       CasePaymentSource @default(TON_WALLET)
   walletAddress       String
   walletAddressRaw    String
   recipientAddress    String
@@ -253,6 +255,11 @@ enum CasePaymentStatus {
   CONFIRMED
   EXPIRED
   FAILED
+}
+
+enum CasePaymentSource {
+  TON_WALLET
+  INTERNAL_BALANCE
 }
 
 enum TonNetwork {

@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import { CasesService } from './cases.service';
 import { CreateCasePaymentIntentDto } from './dto/create-case-payment-intent.dto';
+import { OpenCaseWithBalanceDto } from './dto/open-case-with-balance.dto';
 import { SubmitCasePaymentIntentDto } from './dto/submit-case-payment-intent.dto';
 
 @Controller('cases')
@@ -68,5 +69,13 @@ export class CasesController {
       dto.userId,
       dto.walletAddress,
     );
+  }
+
+  @Post(':slug/open-with-balance')
+  openWithBalance(
+    @Param('slug') slug: string,
+    @Body() dto: OpenCaseWithBalanceDto,
+  ) {
+    return this.casesService.openWithBalance(slug, dto.userId);
   }
 }
