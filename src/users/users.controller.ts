@@ -1,51 +1,68 @@
-import { Controller, Get, Param, Post } from '@nestjs/common';
+import { Controller, Get, Param, Post, Req } from '@nestjs/common';
+import type { Request } from 'express';
+import { createAuditContext } from '../audit/request-audit-context';
+import { CurrentUser } from '../auth/current-user.decorator';
+import type { AuthenticatedUser } from '../auth/authenticated-user';
+import { RateLimit } from '../security/rate-limit.decorator';
 import { UsersService } from './users.service';
 
 @Controller('users')
 export class UsersController {
   constructor(private readonly usersService: UsersService) {}
 
-  @Get()
-  async findAll() {
-    return this.usersService.findAll();
+  @Get('me/profile')
+  async getProfile(@CurrentUser() user: AuthenticatedUser) {
+    return this.usersService.getProfile(user.id);
   }
 
-  @Post('mock')
-  async createMockUser() {
-    return this.usersService.createMockUser();
+  @Get('me/balance')
+  async getBalance(@CurrentUser() user: AuthenticatedUser) {
+    return this.usersService.getBalance(user.id);
   }
 
-  @Get(':userId/profile')
-  async getProfile(@Param('userId') userId: string) {
-    return this.usersService.getProfile(userId);
-  }
-
-  @Get(':userId/balance')
-  async getBalance(@Param('userId') userId: string) {
-    return this.usersService.getBalance(userId);
-  }
-
-  @Get(':userId/inventory/:openingId')
+  @Get('me/inventory/:openingId')
   async getInventoryItem(
-    @Param('userId') userId: string,
+    @CurrentUser() user: AuthenticatedUser,
     @Param('openingId') openingId: string,
   ) {
-    return this.usersService.getInventoryItem(userId, openingId);
+    return this.usersService.getInventoryItem(user.id, openingId);
   }
 
-  @Post(':userId/inventory/:openingId/sell')
+  @RateLimit({
+    key: 'users:inventory:sell',
+    limit: 10,
+    windowMs: 60_000,
+    identity: 'ip-user',
+  })
+  @Post('me/inventory/:openingId/sell')
   async sellInventoryItem(
-    @Param('userId') userId: string,
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() request: Request,
     @Param('openingId') openingId: string,
   ) {
-    return this.usersService.sellInventoryItem(userId, openingId);
+    return this.usersService.sellInventoryItem(
+      user.id,
+      openingId,
+      createAuditContext(request, user.id),
+    );
   }
 
-  @Post(':userId/inventory/:openingId/withdraw')
+  @RateLimit({
+    key: 'users:inventory:withdraw',
+    limit: 10,
+    windowMs: 60_000,
+    identity: 'ip-user',
+  })
+  @Post('me/inventory/:openingId/withdraw')
   async requestWithdrawInventoryItem(
-    @Param('userId') userId: string,
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() request: Request,
     @Param('openingId') openingId: string,
   ) {
-    return this.usersService.requestWithdrawInventoryItem(userId, openingId);
+    return this.usersService.requestWithdrawInventoryItem(
+      user.id,
+      openingId,
+      createAuditContext(request, user.id),
+    );
   }
 }

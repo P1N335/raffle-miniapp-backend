@@ -6,8 +6,9 @@ import {
   NotFoundException,
   OnModuleInit,
 } from '@nestjs/common';
-import { randomUUID } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 import {
+  BalanceTransactionType,
   CasePaymentStatus,
   CasePaymentSource,
   CaseRewardRarity,
@@ -15,6 +16,8 @@ import {
   TonNetwork,
 } from '@prisma/client';
 import { Address, beginCell, Cell } from '@ton/core';
+import { AuditService } from '../audit/audit.service';
+import { AuditContext } from '../audit/audit.types';
 import { PrismaService } from '../prisma/prisma.service';
 import { CASE_CATALOG, GIFT_TYPE_CATALOG } from './cases.catalog';
 
@@ -53,7 +56,10 @@ type PaymentIntentRecord = Prisma.CasePaymentIntentGetPayload<{
 export class CasesService implements OnModuleInit {
   private readonly logger = new Logger(CasesService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly auditService: AuditService,
+  ) {}
 
   async onModuleInit() {
     await this.syncCatalog();
@@ -106,8 +112,9 @@ export class CasesService implements OnModuleInit {
 
   async createPaymentIntent(
     slug: string,
-    userId: string | undefined,
+    userId: string,
     walletAddress: string,
+    auditContext: AuditContext,
   ) {
     const caseItem = await this.prisma.caseDefinition.findUnique({
       where: { slug },
@@ -124,10 +131,8 @@ export class CasesService implements OnModuleInit {
     const paymentIntentId = randomUUID();
     const reference = `casepay:${paymentIntentId}`;
 
-    let resolvedUserId: string | null = null;
-
-    if (userId) {
-      const user = await this.prisma.user.findUnique({
+    const paymentIntent = await this.prisma.$transaction(async (tx) => {
+      const user = await tx.user.findUnique({
         where: { id: userId },
         select: {
           id: true,
@@ -138,7 +143,7 @@ export class CasesService implements OnModuleInit {
         throw new NotFoundException('User not found');
       }
 
-      const existingWalletOwner = await this.prisma.user.findFirst({
+      const existingWalletOwner = await tx.user.findFirst({
         where: {
           tonWalletAddressRaw: normalizedWallet.raw,
           NOT: {
@@ -156,7 +161,7 @@ export class CasesService implements OnModuleInit {
         );
       }
 
-      await this.prisma.user.update({
+      await tx.user.update({
         where: { id: userId },
         data: {
           tonWalletAddress: normalizedWallet.userFriendly,
@@ -166,26 +171,43 @@ export class CasesService implements OnModuleInit {
         },
       });
 
-      resolvedUserId = userId;
-    }
+      const createdIntent = await tx.casePaymentIntent.create({
+        data: {
+          id: paymentIntentId,
+          userId,
+          caseId: caseItem.id,
+          caseSlug: caseItem.slug,
+          caseName: caseItem.name,
+          paymentSource: CasePaymentSource.TON_WALLET,
+          walletAddress: normalizedWallet.userFriendly,
+          walletAddressRaw: normalizedWallet.raw,
+          recipientAddress: recipientAddress.userFriendly,
+          recipientAddressRaw: recipientAddress.raw,
+          amountTon: caseItem.priceTon,
+          amountNano,
+          reference,
+          validUntil,
+        },
+      });
 
-    const paymentIntent = await this.prisma.casePaymentIntent.create({
-      data: {
-        id: paymentIntentId,
-        userId: resolvedUserId,
-        caseId: caseItem.id,
-        caseSlug: caseItem.slug,
-        caseName: caseItem.name,
-        paymentSource: CasePaymentSource.TON_WALLET,
-        walletAddress: normalizedWallet.userFriendly,
-        walletAddressRaw: normalizedWallet.raw,
-        recipientAddress: recipientAddress.userFriendly,
-        recipientAddressRaw: recipientAddress.raw,
-        amountTon: caseItem.priceTon,
-        amountNano,
-        reference,
-        validUntil,
-      },
+      await this.auditService.write(
+        {
+          ...auditContext,
+          userId,
+          action: 'cases.payment_intent.create',
+          entityType: 'case_payment_intent',
+          entityId: createdIntent.id,
+          metadata: {
+            caseId: caseItem.id,
+            caseSlug: caseItem.slug,
+            amountTon: caseItem.priceTon,
+            paymentSource: 'ton_wallet',
+          },
+        },
+        tx,
+      );
+
+      return createdIntent;
     });
 
     return {
@@ -203,7 +225,11 @@ export class CasesService implements OnModuleInit {
     };
   }
 
-  async openWithBalance(slug: string, userId: string) {
+  async openWithBalance(
+    slug: string,
+    userId: string,
+    auditContext: AuditContext,
+  ) {
     return this.prisma.$transaction(async (tx) => {
       const caseItem = await tx.caseDefinition.findUnique({
         where: { slug },
@@ -235,12 +261,6 @@ export class CasesService implements OnModuleInit {
         throw new NotFoundException('User not found');
       }
 
-      if (user.balanceTon < caseItem.priceTon) {
-        throw new BadRequestException(
-          `You need at least ${caseItem.priceTon} TON on your internal balance`,
-        );
-      }
-
       if (caseItem.drops.length === 0) {
         throw new InternalServerErrorException(
           'Case catalog is not ready for opening',
@@ -252,14 +272,25 @@ export class CasesService implements OnModuleInit {
       const reference = `balance:${paymentIntentId}`;
       const winningDrop = pickWeightedDrop(caseItem.drops);
 
-      await tx.user.update({
-        where: { id: userId },
+      const debitedUser = await tx.user.updateMany({
+        where: {
+          id: userId,
+          balanceTon: {
+            gte: caseItem.priceTon,
+          },
+        },
         data: {
           balanceTon: {
             decrement: caseItem.priceTon,
           },
         },
       });
+
+      if (debitedUser.count !== 1) {
+        throw new BadRequestException(
+          `You need at least ${caseItem.priceTon} TON on your internal balance`,
+        );
+      }
 
       await tx.casePaymentIntent.create({
         data: {
@@ -299,6 +330,41 @@ export class CasesService implements OnModuleInit {
         },
       });
 
+      if (!updatedUser) {
+        throw new NotFoundException('User not found');
+      }
+
+      await tx.balanceTransaction.create({
+        data: {
+          userId,
+          type: BalanceTransactionType.CASE_OPENING,
+          amountTon: -caseItem.priceTon,
+          balanceAfterTon: updatedUser.balanceTon,
+          referenceType: 'case_opening',
+          referenceId: opening.id,
+          note: `Opened ${caseItem.name}`,
+        },
+      });
+
+      await this.auditService.write(
+        {
+          ...auditContext,
+          userId,
+          action: 'cases.open_with_balance',
+          entityType: 'case_opening',
+          entityId: opening.id,
+          metadata: {
+            caseId: caseItem.id,
+            caseSlug: caseItem.slug,
+            paymentIntentId,
+            giftTypeId: winningDrop.giftType.id,
+            amountTon: caseItem.priceTon,
+            balanceAfterTon: updatedUser.balanceTon,
+          },
+        },
+        tx,
+      );
+
       return {
         paymentIntent: {
           id: paymentIntentId,
@@ -335,17 +401,17 @@ export class CasesService implements OnModuleInit {
           surfaceTint: caseItem.surfaceTint,
         },
         reward: this.mapRewardDrop(winningDrop),
-        balanceTon: updatedUser?.balanceTon ?? 0,
+        balanceTon: updatedUser.balanceTon,
       };
     });
   }
 
-  async submitPaymentIntent(intentId: string, boc?: string) {
+  async submitPaymentIntent(intentId: string, userId: string, boc?: string) {
     const paymentIntent = await this.prisma.casePaymentIntent.findUnique({
       where: { id: intentId },
     });
 
-    if (!paymentIntent) {
+    if (!paymentIntent || paymentIntent.userId !== userId) {
       throw new NotFoundException('Payment intent not found');
     }
 
@@ -368,7 +434,7 @@ export class CasesService implements OnModuleInit {
     };
   }
 
-  async getPaymentIntentStatus(intentId: string) {
+  async getPaymentIntentStatus(intentId: string, userId: string) {
     const paymentIntent = await this.prisma.casePaymentIntent.findUnique({
       where: { id: intentId },
       include: {
@@ -386,7 +452,7 @@ export class CasesService implements OnModuleInit {
       },
     });
 
-    if (!paymentIntent) {
+    if (!paymentIntent || paymentIntent.userId !== userId) {
       throw new NotFoundException('Payment intent not found');
     }
 
@@ -395,9 +461,9 @@ export class CasesService implements OnModuleInit {
     return this.mapPaymentIntentStatusResponse(resolvedIntent);
   }
 
-  async findOpenings(userId?: string, limit = 10) {
+  async findOpenings(userId: string, limit = 10) {
     const openings = await this.prisma.caseOpening.findMany({
-      where: userId ? { userId } : undefined,
+      where: { userId },
       include: {
         case: true,
         caseDrop: {
@@ -491,8 +557,8 @@ export class CasesService implements OnModuleInit {
       };
     }
 
-    try {
-      const matchingTransaction = await this.findMatchingTransaction(paymentIntent);
+      try {
+        const matchingTransaction = await this.findMatchingTransaction(paymentIntent);
 
       if (!matchingTransaction) {
         return paymentIntent;
@@ -514,8 +580,8 @@ export class CasesService implements OnModuleInit {
         },
       });
 
-      if (!existingOpening) {
-        const caseItem = await this.prisma.caseDefinition.findUnique({
+        if (!existingOpening) {
+          const caseItem = await this.prisma.caseDefinition.findUnique({
           where: { id: paymentIntent.caseId },
           include: {
             drops: {
@@ -537,17 +603,30 @@ export class CasesService implements OnModuleInit {
 
         const winningDrop = pickWeightedDrop(caseItem.drops);
 
-        await this.prisma.caseOpening.create({
-          data: {
+          const opening = await this.prisma.caseOpening.create({
+            data: {
+              userId: paymentIntent.userId,
+              caseId: caseItem.id,
+              caseDropId: winningDrop.id,
+              giftTypeId: winningDrop.giftType.id,
+              paymentIntentId: paymentIntent.id,
+            },
+          });
+
+          await this.auditService.write({
             userId: paymentIntent.userId,
-            caseId: caseItem.id,
-            caseDropId: winningDrop.id,
-            giftTypeId: winningDrop.giftType.id,
-            paymentIntentId: paymentIntent.id,
-          },
-        });
-      }
-    } catch (error) {
+            action: 'cases.payment.confirmed',
+            entityType: 'case_payment_intent',
+            entityId: paymentIntent.id,
+            metadata: {
+              caseId: caseItem.id,
+              caseSlug: caseItem.slug,
+              openingId: opening.id,
+              giftTypeId: winningDrop.giftType.id,
+            },
+          });
+        }
+      } catch (error) {
       this.logger.warn(
         `TON payment verification for ${paymentIntent.id} failed: ${
           error instanceof Error ? error.message : 'Unknown error'
@@ -905,12 +984,12 @@ type TonCenterTransaction = {
 
 function pickWeightedDrop(drops: CaseRecord['drops']) {
   const totalChance = drops.reduce((sum, drop) => sum + drop.chance, 0);
-  let random = Math.random() * totalChance;
+  let random = randomInt(totalChance);
 
   for (const drop of drops) {
     random -= drop.chance;
 
-    if (random <= 0) {
+    if (random < 0) {
       return drop;
     }
   }

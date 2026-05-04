@@ -3,7 +3,14 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { CaseOpeningStatus, Prisma } from '@prisma/client';
+import {
+  BalanceTransactionType,
+  CaseOpeningStatus,
+  GiftPurchaseStatus,
+  Prisma,
+} from '@prisma/client';
+import { AuditService } from '../audit/audit.service';
+import { AuditContext } from '../audit/audit.types';
 import { PrismaService } from '../prisma/prisma.service';
 
 type CaseOpeningRecord = Prisma.CaseOpeningGetPayload<{
@@ -15,26 +22,10 @@ type CaseOpeningRecord = Prisma.CaseOpeningGetPayload<{
 
 @Injectable()
 export class UsersService {
-  constructor(private readonly prisma: PrismaService) {}
-
-  async findAll() {
-    return this.prisma.user.findMany({
-      orderBy: {
-        createdAt: 'desc',
-      },
-    });
-  }
-
-  async createMockUser() {
-    return this.prisma.user.create({
-      data: {
-        telegramId: Date.now().toString(),
-        username: `user_${Math.floor(Math.random() * 10000)}`,
-        firstName: 'Test',
-        lastName: 'User',
-      },
-    });
-  }
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly auditService: AuditService,
+  ) {}
 
   async getProfile(userId: string) {
     const user = await this.prisma.user.findUnique({
@@ -151,7 +142,11 @@ export class UsersService {
     return this.mapInventoryItem(opening);
   }
 
-  async sellInventoryItem(userId: string, openingId: string) {
+  async sellInventoryItem(
+    userId: string,
+    openingId: string,
+    auditContext: AuditContext,
+  ) {
     const opening = await this.prisma.caseOpening.findFirst({
       where: {
         id: openingId,
@@ -172,33 +167,87 @@ export class UsersService {
     }
 
     const updatedOpening = await this.prisma.$transaction(async (tx) => {
-      await tx.user.update({
+      const soldAt = new Date();
+      const sellResult = await tx.caseOpening.updateMany({
+        where: {
+          id: opening.id,
+          userId,
+          status: CaseOpeningStatus.OWNED,
+        },
+        data: {
+          status: CaseOpeningStatus.SOLD,
+          soldAmountTon: opening.giftType.estimatedValueTon,
+          soldAt,
+        },
+      });
+
+      if (sellResult.count !== 1) {
+        throw new BadRequestException('This inventory item is no longer available');
+      }
+
+      const updatedUser = await tx.user.update({
         where: { id: userId },
         data: {
           balanceTon: {
             increment: opening.giftType.estimatedValueTon,
           },
         },
+        select: {
+          balanceTon: true,
+        },
       });
 
-      return tx.caseOpening.update({
-        where: { id: opening.id },
+      await tx.balanceTransaction.create({
         data: {
-          status: CaseOpeningStatus.SOLD,
-          soldAmountTon: opening.giftType.estimatedValueTon,
-          soldAt: new Date(),
+          userId,
+          type: BalanceTransactionType.INVENTORY_SALE,
+          amountTon: opening.giftType.estimatedValueTon,
+          balanceAfterTon: updatedUser.balanceTon,
+          referenceType: 'inventory_item',
+          referenceId: opening.id,
+          note: `Sold ${opening.giftType.name}`,
         },
+      });
+
+      await this.auditService.write(
+        {
+          ...auditContext,
+          userId,
+          action: 'inventory.sell',
+          entityType: 'case_opening',
+          entityId: opening.id,
+          metadata: {
+            giftTypeId: opening.giftType.id,
+            amountTon: opening.giftType.estimatedValueTon,
+            balanceAfterTon: updatedUser.balanceTon,
+          },
+        },
+        tx,
+      );
+
+      const refreshedOpening = await tx.caseOpening.findUnique({
+        where: { id: opening.id },
         include: {
           case: true,
           giftType: true,
         },
       });
+
+      if (!refreshedOpening) {
+        throw new NotFoundException('Inventory item not found');
+      }
+
+      return refreshedOpening;
     });
 
     return this.mapInventoryItem(updatedOpening);
   }
 
-  async requestWithdrawInventoryItem(userId: string, openingId: string) {
+  async requestWithdrawInventoryItem(
+    userId: string,
+    openingId: string,
+    auditContext: AuditContext,
+  ) {
     const opening = await this.prisma.caseOpening.findFirst({
       where: {
         id: openingId,
@@ -218,16 +267,85 @@ export class UsersService {
       throw new BadRequestException('Only owned items can be withdrawn');
     }
 
-    const updatedOpening = await this.prisma.caseOpening.update({
-      where: { id: opening.id },
-      data: {
-        status: CaseOpeningStatus.WITHDRAW_PENDING,
-        withdrawalRequestedAt: new Date(),
-      },
-      include: {
-        case: true,
-        giftType: true,
-      },
+    const updatedOpening = await this.prisma.$transaction(async (tx) => {
+      const withdrawalRequestedAt = new Date();
+      const requestResult = await tx.caseOpening.updateMany({
+        where: {
+          id: opening.id,
+          userId,
+          status: CaseOpeningStatus.OWNED,
+        },
+        data: {
+          status: CaseOpeningStatus.WITHDRAW_PENDING,
+          withdrawalRequestedAt,
+        },
+      });
+
+      if (requestResult.count !== 1) {
+        throw new BadRequestException('This inventory item is no longer available');
+      }
+
+      await tx.giftPurchaseRequest.upsert({
+        where: {
+          openingId: opening.id,
+        },
+        update: {
+          userId,
+          giftTypeId: opening.giftType.id,
+          status: GiftPurchaseStatus.QUEUED,
+          searchQuery: opening.giftType.name,
+          providerKey: null,
+          providerLabel: null,
+          externalListingId: null,
+          externalListingUrl: null,
+          externalOrderId: null,
+          quotedPriceTon: null,
+          purchasedPriceTon: null,
+          deliveryTelegramGiftId: null,
+          failureReason: null,
+          cancelledAt: null,
+          searchStartedAt: null,
+          offerFoundAt: null,
+          purchasedAt: null,
+          deliveredAt: null,
+        },
+        create: {
+          userId,
+          openingId: opening.id,
+          giftTypeId: opening.giftType.id,
+          status: GiftPurchaseStatus.QUEUED,
+          searchQuery: opening.giftType.name,
+        },
+      });
+
+      await this.auditService.write(
+        {
+          ...auditContext,
+          userId,
+          action: 'inventory.withdraw_request',
+          entityType: 'case_opening',
+          entityId: opening.id,
+          metadata: {
+            giftTypeId: opening.giftType.id,
+            purchaseQueueStatus: 'queued',
+          },
+        },
+        tx,
+      );
+
+      const refreshedOpening = await tx.caseOpening.findUnique({
+        where: { id: opening.id },
+        include: {
+          case: true,
+          giftType: true,
+        },
+      });
+
+      if (!refreshedOpening) {
+        throw new NotFoundException('Inventory item not found');
+      }
+
+      return refreshedOpening;
     });
 
     return this.mapInventoryItem(updatedOpening);

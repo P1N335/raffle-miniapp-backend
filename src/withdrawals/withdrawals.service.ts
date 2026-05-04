@@ -3,7 +3,11 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { CaseOpeningStatus, Prisma } from '@prisma/client';
+import {
+  CaseOpeningStatus,
+  GiftPurchaseStatus,
+  Prisma,
+} from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
 type WithdrawalRecord = Prisma.CaseOpeningGetPayload<{
@@ -91,21 +95,39 @@ export class WithdrawalsService {
       );
     }
 
-    const updatedOpening = await this.prisma.caseOpening.update({
-      where: {
-        id: openingId,
-      },
-      data: {
-        status: CaseOpeningStatus.WITHDRAWN,
-        telegramOwnedGiftId: telegramOwnedGiftId ?? opening.telegramOwnedGiftId,
-        withdrawFailureReason: null,
-        withdrawnAt: new Date(),
-      },
-      include: {
-        user: true,
-        case: true,
-        giftType: true,
-      },
+    const updatedOpening = await this.prisma.$transaction(async (tx) => {
+      const withdrawnAt = new Date();
+      const result = await tx.caseOpening.update({
+        where: {
+          id: openingId,
+        },
+        data: {
+          status: CaseOpeningStatus.WITHDRAWN,
+          telegramOwnedGiftId: telegramOwnedGiftId ?? opening.telegramOwnedGiftId,
+          withdrawFailureReason: null,
+          withdrawnAt,
+        },
+        include: {
+          user: true,
+          case: true,
+          giftType: true,
+        },
+      });
+
+      await tx.giftPurchaseRequest.updateMany({
+        where: {
+          openingId,
+        },
+        data: {
+          status: GiftPurchaseStatus.DELIVERED,
+          deliveryTelegramGiftId:
+            telegramOwnedGiftId ?? opening.telegramOwnedGiftId ?? null,
+          deliveredAt: withdrawnAt,
+          failureReason: null,
+        },
+      });
+
+      return result;
     });
 
     return this.mapWithdrawalRequest(updatedOpening);
@@ -133,21 +155,35 @@ export class WithdrawalsService {
       );
     }
 
-    const updatedOpening = await this.prisma.caseOpening.update({
-      where: {
-        id: openingId,
-      },
-      data: {
-        status: CaseOpeningStatus.OWNED,
-        withdrawFailureReason: reason,
-        withdrawnAt: null,
-        telegramOwnedGiftId: null,
-      },
-      include: {
-        user: true,
-        case: true,
-        giftType: true,
-      },
+    const updatedOpening = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.caseOpening.update({
+        where: {
+          id: openingId,
+        },
+        data: {
+          status: CaseOpeningStatus.OWNED,
+          withdrawFailureReason: reason,
+          withdrawnAt: null,
+          telegramOwnedGiftId: null,
+        },
+        include: {
+          user: true,
+          case: true,
+          giftType: true,
+        },
+      });
+
+      await tx.giftPurchaseRequest.updateMany({
+        where: {
+          openingId,
+        },
+        data: {
+          status: GiftPurchaseStatus.FAILED,
+          failureReason: reason,
+        },
+      });
+
+      return result;
     });
 
     return this.mapWithdrawalRequest(updatedOpening);

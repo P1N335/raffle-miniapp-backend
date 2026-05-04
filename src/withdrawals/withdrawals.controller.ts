@@ -7,11 +7,13 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import { Public } from '../auth/public.decorator';
 import { BotApiKeyGuard } from './bot-api-key.guard';
 import { CompleteWithdrawalDto } from './dto/complete-withdrawal.dto';
 import { FailWithdrawalDto } from './dto/fail-withdrawal.dto';
 import { WithdrawalsService } from './withdrawals.service';
 
+@Public()
 @UseGuards(BotApiKeyGuard)
 @Controller('withdrawals')
 export class WithdrawalsController {

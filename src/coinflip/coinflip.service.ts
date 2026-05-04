@@ -3,6 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { randomInt } from 'node:crypto';
 import {
   CaseOpeningStatus,
   CoinflipRoomStatus,
@@ -10,6 +11,8 @@ import {
   Prisma,
 } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
+import { AuditService } from '../audit/audit.service';
+import { AuditContext } from '../audit/audit.types';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateCoinflipRoomDto } from './dto/create-coinflip-room.dto';
 import { JoinCoinflipRoomDto } from './dto/join-coinflip-room.dto';
@@ -76,7 +79,10 @@ type PrismaClientLike = PrismaService | Prisma.TransactionClient;
 
 @Injectable()
 export class CoinflipService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly auditService: AuditService,
+  ) {}
 
   async findOpenRooms() {
     const rooms = await this.prisma.coinflipRoom.findMany({
@@ -107,7 +113,11 @@ export class CoinflipService {
     return this.mapRoomDetail(room);
   }
 
-  async createRoom(dto: CreateCoinflipRoomDto) {
+  async createRoom(
+    userId: string,
+    dto: CreateCoinflipRoomDto,
+    auditContext: AuditContext,
+  ) {
     const openingIds = normalizeOpeningIds(dto.openingIds);
 
     if (openingIds.length === 0) {
@@ -115,10 +125,10 @@ export class CoinflipService {
     }
 
     return this.prisma.$transaction(async (tx) => {
-      await this.ensureUserExists(tx, dto.userId);
-      await this.ensureUserHasNoOpenRoom(tx, dto.userId);
+      await this.ensureUserExists(tx, userId);
+      await this.ensureUserHasNoOpenRoom(tx, userId);
 
-      const openings = await this.getSelectableOpenings(tx, dto.userId, openingIds);
+      const openings = await this.getSelectableOpenings(tx, userId, openingIds);
       const creatorTotalTon = sumOpeningValue(openings);
 
       const lockedItems = await tx.caseOpening.updateMany({
@@ -126,9 +136,9 @@ export class CoinflipService {
           id: {
             in: openingIds,
           },
-          userId: dto.userId,
-          status: CaseOpeningStatus.OWNED,
-        },
+            userId,
+            status: CaseOpeningStatus.OWNED,
+          },
         data: {
           status: CaseOpeningStatus.IN_COINFLIP,
           soldAmountTon: null,
@@ -150,7 +160,7 @@ export class CoinflipService {
       const room = await tx.coinflipRoom.create({
         data: {
           roomCode,
-          creatorUserId: dto.userId,
+          creatorUserId: userId,
           creatorTotalTon,
           creatorReadyAt: new Date(),
         },
@@ -159,7 +169,7 @@ export class CoinflipService {
       await tx.coinflipRoomItem.createMany({
         data: openings.map((opening) => ({
           roomId: room.id,
-          userId: dto.userId,
+          userId,
           openingId: opening.id,
           giftTypeId: opening.giftTypeId,
           seat: CoinflipSeat.CREATOR,
@@ -178,13 +188,30 @@ export class CoinflipService {
         throw new NotFoundException('CoinFlip room was not created');
       }
 
+      await this.auditService.write(
+        {
+          ...auditContext,
+          userId,
+          action: 'coinflip.room.create',
+          entityType: 'coinflip_room',
+          entityId: room.id,
+          metadata: {
+            roomCode,
+            creatorTotalTon,
+            openingIds,
+          },
+        },
+        tx,
+      );
+
       return this.mapRoomDetail(createdRoom);
     });
   }
 
-  async cancelRoom(roomId: string, userId: string) {
+  async cancelRoom(roomId: string, userId: string, auditContext: AuditContext) {
     return this.prisma.$transaction(async (tx) => {
       await this.ensureUserExists(tx, userId);
+      await this.lockRoom(tx, roomId);
 
       const room = await tx.coinflipRoom.findUnique({
         where: {
@@ -233,11 +260,31 @@ export class CoinflipService {
         ...roomPayload,
       });
 
+      await this.auditService.write(
+        {
+          ...auditContext,
+          userId,
+          action: 'coinflip.room.cancel',
+          entityType: 'coinflip_room',
+          entityId: roomId,
+          metadata: {
+            roomCode: room.roomCode,
+            returnedOpeningIds: creatorOpeningIds,
+          },
+        },
+        tx,
+      );
+
       return this.mapRoomDetail(cancelledRoom);
     });
   }
 
-  async joinRoom(roomId: string, dto: JoinCoinflipRoomDto) {
+  async joinRoom(
+    roomId: string,
+    userId: string,
+    dto: JoinCoinflipRoomDto,
+    auditContext: AuditContext,
+  ) {
     const openingIds = normalizeOpeningIds(dto.openingIds);
 
     if (openingIds.length === 0) {
@@ -245,7 +292,8 @@ export class CoinflipService {
     }
 
     return this.prisma.$transaction(async (tx) => {
-      await this.ensureUserExists(tx, dto.userId);
+      await this.ensureUserExists(tx, userId);
+      await this.lockRoom(tx, roomId);
 
       const room = await tx.coinflipRoom.findUnique({
         where: {
@@ -262,13 +310,13 @@ export class CoinflipService {
         throw new BadRequestException('This room is no longer available');
       }
 
-      if (room.creatorUserId === dto.userId) {
+      if (room.creatorUserId === userId) {
         throw new BadRequestException('You cannot join your own room');
       }
 
-      await this.ensureUserHasNoOpenRoom(tx, dto.userId);
+      await this.ensureUserHasNoOpenRoom(tx, userId);
 
-      const openings = await this.getSelectableOpenings(tx, dto.userId, openingIds);
+      const openings = await this.getSelectableOpenings(tx, userId, openingIds);
       const opponentTotalTon = sumOpeningValue(openings);
       const joinRangeTon = calculateJoinRange(room.creatorTotalTon);
 
@@ -286,9 +334,9 @@ export class CoinflipService {
           id: {
             in: openingIds,
           },
-          userId: dto.userId,
-          status: CaseOpeningStatus.OWNED,
-        },
+            userId,
+            status: CaseOpeningStatus.OWNED,
+          },
         data: {
           status: CaseOpeningStatus.IN_COINFLIP,
           soldAmountTon: null,
@@ -309,7 +357,7 @@ export class CoinflipService {
       await tx.coinflipRoomItem.createMany({
         data: openings.map((opening) => ({
           roomId: room.id,
-          userId: dto.userId,
+          userId,
           openingId: opening.id,
           giftTypeId: opening.giftTypeId,
           seat: CoinflipSeat.OPPONENT,
@@ -318,9 +366,8 @@ export class CoinflipService {
       });
 
       const totalPotTon = room.creatorTotalTon + opponentTotalTon;
-      const creatorWinThreshold = room.creatorTotalTon / totalPotTon;
-      const winnerUserId =
-        Math.random() < creatorWinThreshold ? room.creatorUserId : dto.userId;
+      const creatorWins = randomInt(totalPotTon) < room.creatorTotalTon;
+      const winnerUserId = creatorWins ? room.creatorUserId : userId;
 
       const creatorOpeningIds = room.items
         .filter((item) => item.seat === CoinflipSeat.CREATOR)
@@ -351,7 +398,7 @@ export class CoinflipService {
           id: room.id,
         },
         data: {
-          opponentUserId: dto.userId,
+          opponentUserId: userId,
           opponentTotalTon,
           opponentReadyAt: new Date(),
           winnerUserId,
@@ -360,6 +407,24 @@ export class CoinflipService {
         },
         ...roomPayload,
       });
+
+      await this.auditService.write(
+        {
+          ...auditContext,
+          userId,
+          action: 'coinflip.room.join',
+          entityType: 'coinflip_room',
+          entityId: room.id,
+          metadata: {
+            roomCode: room.roomCode,
+            creatorTotalTon: room.creatorTotalTon,
+            opponentTotalTon,
+            winnerUserId,
+            openingIds,
+          },
+        },
+        tx,
+      );
 
       return this.mapRoomDetail(finishedRoom);
     });
@@ -394,6 +459,10 @@ export class CoinflipService {
     if (existingRoom) {
       throw new BadRequestException('Finish or cancel your open CoinFlip room first');
     }
+  }
+
+  private async lockRoom(client: Prisma.TransactionClient, roomId: string) {
+    await client.$queryRaw`SELECT "id" FROM "CoinflipRoom" WHERE "id" = ${roomId} FOR UPDATE`;
   }
 
   private async getSelectableOpenings(

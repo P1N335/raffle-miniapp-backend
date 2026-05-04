@@ -29,6 +29,10 @@ model User {
   joinedCoinflipRooms  CoinflipRoom[]   @relation("CoinflipOpponent")
   wonCoinflipRooms     CoinflipRoom[]   @relation("CoinflipWinner")
   coinflipRoomItems    CoinflipRoomItem[]
+  authSessions         AuthSession[]
+  balanceTransactions  BalanceTransaction[]
+  auditLogs            AuditLog[]
+  giftPurchaseRequests GiftPurchaseRequest[]
 }
 
 model RaffleRound {
@@ -81,6 +85,7 @@ model GiftType {
   caseDrops    CaseDrop[]
   caseOpenings CaseOpening[]
   coinflipRoomItems CoinflipRoomItem[]
+  giftPurchaseRequests GiftPurchaseRequest[]
 }
 
 model CaseDefinition {
@@ -180,6 +185,7 @@ model CaseOpening {
   giftType      GiftType          @relation(fields: [giftTypeId], references: [id], onDelete: Restrict)
   paymentIntent CasePaymentIntent @relation(fields: [paymentIntentId], references: [id], onDelete: Cascade)
   coinflipRoomItems CoinflipRoomItem[]
+  giftPurchaseRequest GiftPurchaseRequest?
 
   @@index([caseId])
   @@index([caseDropId])
@@ -236,6 +242,94 @@ model CoinflipRoomItem {
   @@index([userId])
 }
 
+model AuthSession {
+  id         String   @id @default(cuid())
+  userId     String
+  tokenHash  String   @unique
+  expiresAt  DateTime
+  lastUsedAt DateTime @default(now())
+  revokedAt  DateTime?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@index([expiresAt])
+}
+
+model BalanceTransaction {
+  id             String                 @id @default(cuid())
+  userId         String
+  type           BalanceTransactionType
+  amountTon      Int
+  balanceAfterTon Int
+  referenceType  String?
+  referenceId    String?
+  note           String?
+  createdAt      DateTime               @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([type, createdAt])
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  userId      String?
+  action      String
+  entityType  String
+  entityId    String?
+  requestPath String?
+  ipAddress   String?
+  userAgent   String?
+  metadata    Json?
+  createdAt   DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([action, createdAt])
+}
+
+model GiftPurchaseRequest {
+  id                    String             @id @default(cuid())
+  userId                String
+  openingId             String             @unique
+  giftTypeId            String
+  status                GiftPurchaseStatus @default(QUEUED)
+  providerKey           String?
+  providerLabel         String?
+  searchQuery           String
+  externalListingId     String?
+  externalListingUrl    String?
+  externalOrderId       String?
+  quotedPriceTon        Int?
+  purchasedPriceTon     Int?
+  deliveryTelegramGiftId String?
+  failureReason         String?
+  adminNote             String?
+  metadata              Json?
+  queuedAt              DateTime           @default(now())
+  searchStartedAt       DateTime?
+  offerFoundAt          DateTime?
+  purchasedAt           DateTime?
+  deliveredAt           DateTime?
+  cancelledAt           DateTime?
+  updatedAt             DateTime           @updatedAt
+
+  user     User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  opening  CaseOpening @relation(fields: [openingId], references: [id], onDelete: Cascade)
+  giftType GiftType    @relation(fields: [giftTypeId], references: [id], onDelete: Restrict)
+
+  @@index([userId, queuedAt])
+  @@index([status, queuedAt])
+  @@index([giftTypeId, status])
+}
+
 enum RaffleStatus {
   BETTING
   SPINNING
@@ -284,4 +378,23 @@ enum CoinflipRoomStatus {
 enum CoinflipSeat {
   CREATOR
   OPPONENT
+}
+
+enum BalanceTransactionType {
+  INVENTORY_SALE
+  CASE_OPENING
+  ADMIN_CREDIT
+  ADMIN_DEBIT
+}
+
+enum GiftPurchaseStatus {
+  QUEUED
+  SEARCHING
+  OFFER_FOUND
+  PURCHASE_PENDING
+  PURCHASED
+  DELIVERY_PENDING
+  DELIVERED
+  FAILED
+  CANCELLED
 }
