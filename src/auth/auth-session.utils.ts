@@ -24,10 +24,14 @@ export function getCookieValue(
 }
 
 export function getSessionCookieOptions(expiresAt: Date): CookieOptions {
+  const secure = isSecureCookieEnabled();
+
   return {
     httpOnly: true,
-    secure: isSecureCookieEnabled(),
-    sameSite: 'lax',
+    secure,
+    // Telegram Mini Apps run in a cross-site context, so secure deployments
+    // need SameSite=None or the browser will drop the session cookie on API calls.
+    sameSite: secure ? 'none' : 'lax',
     path: '/',
     expires: expiresAt,
   };
