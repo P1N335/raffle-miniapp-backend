@@ -13,6 +13,9 @@ import { AuditService } from '../audit/audit.service';
 import { AuditContext } from '../audit/audit.types';
 import { PrismaService } from '../prisma/prisma.service';
 
+const PROFILE_INVENTORY_LIMIT = 48;
+const PROFILE_HISTORY_LIMIT = 50;
+
 type CaseOpeningRecord = Prisma.CaseOpeningGetPayload<{
   include: {
     case: true;
@@ -28,79 +31,107 @@ export class UsersService {
   ) {}
 
   async getProfile(userId: string) {
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: {
-        id: true,
-        telegramId: true,
-        username: true,
-        firstName: true,
-        lastName: true,
-        photoUrl: true,
-        balanceTon: true,
-        tonWalletAddress: true,
-        tonWalletNetwork: true,
-        tonWalletConnectedAt: true,
-      },
-    });
+    const [user, summaryRow, mostExpensiveOpeningRow, inventory, openingHistory] =
+      await Promise.all([
+        this.prisma.user.findUnique({
+          where: { id: userId },
+          select: {
+            id: true,
+            telegramId: true,
+            username: true,
+            firstName: true,
+            lastName: true,
+            photoUrl: true,
+            balanceTon: true,
+            tonWalletAddress: true,
+            tonWalletNetwork: true,
+            tonWalletConnectedAt: true,
+          },
+        }),
+        this.prisma.$queryRaw<
+          Array<{
+            totalWonTon: string | number | bigint | null;
+            totalSoldTon: string | number | bigint | null;
+            totalItemsWon: string | number | bigint;
+            activeInventoryCount: string | number | bigint;
+          }>
+        >`
+          SELECT
+            COALESCE(SUM(gt."estimatedValueTon"), 0)::bigint AS "totalWonTon",
+            COALESCE(SUM(co."soldAmountTon"), 0)::bigint AS "totalSoldTon",
+            COUNT(*)::bigint AS "totalItemsWon",
+            COUNT(*) FILTER (WHERE co."status"::text = ${CaseOpeningStatus.OWNED})::bigint AS "activeInventoryCount"
+          FROM "CaseOpening" co
+          INNER JOIN "GiftType" gt ON gt."id" = co."giftTypeId"
+          WHERE co."userId" = ${userId}
+        `,
+        this.prisma.$queryRaw<Array<{ id: string }>>`
+          SELECT co."id"
+          FROM "CaseOpening" co
+          INNER JOIN "GiftType" gt ON gt."id" = co."giftTypeId"
+          WHERE co."userId" = ${userId}
+          ORDER BY gt."estimatedValueTon" DESC, co."createdAt" DESC
+          LIMIT 1
+        `,
+        this.prisma.caseOpening.findMany({
+          where: {
+            userId,
+            status: CaseOpeningStatus.OWNED,
+          },
+          include: {
+            case: true,
+            giftType: true,
+          },
+          orderBy: {
+            createdAt: 'desc',
+          },
+          take: PROFILE_INVENTORY_LIMIT,
+        }),
+        this.prisma.caseOpening.findMany({
+          where: {
+            userId,
+          },
+          include: {
+            case: true,
+            giftType: true,
+          },
+          orderBy: {
+            createdAt: 'desc',
+          },
+          take: PROFILE_HISTORY_LIMIT,
+        }),
+      ]);
 
     if (!user) {
       throw new NotFoundException('User not found');
     }
 
-    const openings = await this.prisma.caseOpening.findMany({
-      where: {
-        userId,
-      },
-      include: {
-        case: true,
-        giftType: true,
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
-    });
-
-    const totalWonTon = openings.reduce(
-      (sum, opening) => sum + opening.giftType.estimatedValueTon,
-      0,
-    );
-    const totalSoldTon = openings.reduce(
-      (sum, opening) => sum + (opening.soldAmountTon ?? 0),
-      0,
-    );
-    const mostExpensiveOpening = openings.reduce<(typeof openings)[number] | null>(
-      (highest, opening) => {
-        if (!highest) {
-          return opening;
-        }
-
-        return opening.giftType.estimatedValueTon >
-          highest.giftType.estimatedValueTon
-          ? opening
-          : highest;
-      },
-      null,
-    );
-
-    const activeInventory = openings.filter(
-      (opening) => opening.status === CaseOpeningStatus.OWNED,
-    );
+    const mostExpensiveOpeningId = mostExpensiveOpeningRow[0]?.id;
+    const mostExpensiveOpening = mostExpensiveOpeningId
+      ? await this.prisma.caseOpening.findUnique({
+          where: { id: mostExpensiveOpeningId },
+          include: {
+            case: true,
+            giftType: true,
+          },
+        })
+      : null;
+    const summary = summaryRow[0];
 
     return {
       user,
       summary: {
         balanceTon: user.balanceTon,
-        totalWonTon,
-        totalItemsWon: openings.length,
-        activeInventoryCount: activeInventory.length,
-        totalSoldTon,
+        totalWonTon: toSafeNumber(summary?.totalWonTon),
+        totalItemsWon: toSafeNumber(summary?.totalItemsWon),
+        activeInventoryCount: toSafeNumber(summary?.activeInventoryCount),
+        totalSoldTon: toSafeNumber(summary?.totalSoldTon),
         mostExpensiveGift: mostExpensiveOpening
           ? this.mapInventoryItem(mostExpensiveOpening)
           : null,
       },
-      inventory: activeInventory.map((opening) => this.mapInventoryItem(opening)),
-      openingHistory: openings.map((opening) => this.mapHistoryEntry(opening)),
+      inventory: inventory.map((opening) => this.mapInventoryItem(opening)),
+      openingHistory: openingHistory.map((opening) => this.mapHistoryEntry(opening)),
     };
   }
 
@@ -404,4 +435,21 @@ export class UsersService {
       },
     };
   }
+}
+
+function toSafeNumber(value: string | number | bigint | null | undefined) {
+  if (value === null || value === undefined) {
+    return 0;
+  }
+
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : 0;
+  }
+
+  if (typeof value === 'bigint') {
+    return Number(value);
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : 0;
 }

@@ -93,17 +93,9 @@ export class RateLimitGuard implements CanActivate {
   }
 
   private getIpAddress(request: {
-    headers: Record<string, string | string[] | undefined>;
     ip?: string;
     socket?: { remoteAddress?: string };
   }) {
-    const forwarded = request.headers['x-forwarded-for'];
-    const rawForwarded = Array.isArray(forwarded) ? forwarded[0] : forwarded;
-
-    if (rawForwarded) {
-      return rawForwarded.split(',')[0]?.trim() ?? 'unknown';
-    }
-
     return request.ip ?? request.socket?.remoteAddress ?? 'unknown';
   }
 

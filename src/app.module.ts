@@ -13,6 +13,7 @@ import { WithdrawalsModule } from './withdrawals/withdrawals.module';
 import { CoinflipModule } from './coinflip/coinflip.module';
 import { PurchasesModule } from './purchases/purchases.module';
 import { RateLimitGuard } from './security/rate-limit.guard';
+import { RequestVerificationGuard } from './security/request-verification.guard';
 
 const envFilePaths = [
   resolve(process.cwd(), '.env'),
@@ -40,6 +41,10 @@ const envFilePaths = [
     {
       provide: APP_GUARD,
       useClass: AuthSessionGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: RequestVerificationGuard,
     },
     {
       provide: APP_GUARD,

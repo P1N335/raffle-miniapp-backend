@@ -192,6 +192,7 @@ model CaseOpening {
   @@index([giftTypeId])
   @@index([userId])
   @@index([createdAt])
+  @@index([status, withdrawalRequestedAt])
 }
 
 model CoinflipRoom {

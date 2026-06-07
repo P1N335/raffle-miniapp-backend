@@ -30,7 +30,9 @@ export class AuthService {
     }
 
     try {
-      validate(initDataRaw, botToken);
+      validate(initDataRaw, botToken, {
+        expiresIn: getTelegramInitDataMaxAgeSeconds(),
+      });
     } catch (error) {
       this.logger.warn(
         `Telegram initData validation failed: ${
@@ -181,5 +183,18 @@ function normalizeSessionTtlDays() {
     return AUTH_SESSION_TTL_DAYS;
   }
 
-  return 30;
+  return 14;
+}
+
+function getTelegramInitDataMaxAgeSeconds() {
+  const configured = Number.parseInt(
+    process.env.TELEGRAM_INIT_DATA_MAX_AGE_SECONDS?.trim() || '3600',
+    10,
+  );
+
+  if (Number.isFinite(configured) && configured > 0) {
+    return configured;
+  }
+
+  return 3600;
 }

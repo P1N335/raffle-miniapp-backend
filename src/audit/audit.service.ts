@@ -28,11 +28,20 @@ export class AuditService {
         },
       });
     } catch (error) {
-      this.logger.warn(
+      this.logger.error(
         `Failed to write audit log "${entry.action}": ${
           error instanceof Error ? error.message : 'Unknown error'
         }`,
+        error instanceof Error ? error.stack : undefined,
       );
+
+      if (isAuditLogStrictModeEnabled()) {
+        throw error;
+      }
     }
   }
+}
+
+function isAuditLogStrictModeEnabled() {
+  return process.env.AUDIT_LOG_REQUIRED?.trim().toLowerCase() === 'true';
 }

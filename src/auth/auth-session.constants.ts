@@ -2,7 +2,7 @@ export const AUTH_SESSION_COOKIE_NAME =
   process.env.AUTH_SESSION_COOKIE_NAME?.trim() || 'raffle_session';
 
 export const AUTH_SESSION_TTL_DAYS = Number.parseInt(
-  process.env.AUTH_SESSION_TTL_DAYS?.trim() || '30',
+  process.env.AUTH_SESSION_TTL_DAYS?.trim() || '14',
   10,
 );
 

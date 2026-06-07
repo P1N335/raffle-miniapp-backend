@@ -25,6 +25,8 @@ const TONCENTER_DEFAULT_BASE_URL = 'https://toncenter.com/api';
 const TON_NANO = 1_000_000_000n;
 const PAYMENT_VALIDITY_SECONDS = 300;
 const PAYMENT_EXPIRY_GRACE_SECONDS = 900;
+const TONCENTER_REQUEST_TIMEOUT_MS = 5000;
+const TONCENTER_REQUEST_ATTEMPTS = 2;
 
 type CaseRecord = Prisma.CaseDefinitionGetPayload<{
   include: {
@@ -156,9 +158,7 @@ export class CasesService implements OnModuleInit {
       });
 
       if (existingWalletOwner) {
-        throw new BadRequestException(
-          'This TON wallet is already linked to another user',
-        );
+        throw new BadRequestException('Unable to link this TON wallet');
       }
 
       await tx.user.update({
@@ -499,19 +499,11 @@ export class CasesService implements OnModuleInit {
     const url = new URL('/api/v2/getAddressBalance', this.getTonCenterOrigin());
     url.searchParams.set('address', normalizedAddress.userFriendly);
 
-    const response = await fetch(url, {
-      headers: this.getTonCenterHeaders(),
-    });
-
-    if (!response.ok) {
-      throw new InternalServerErrorException('Failed to load TON wallet balance');
-    }
-
-    const payload = (await response.json()) as {
+    const payload = await this.fetchTonCenterJson<{
       ok?: boolean;
       result?: string;
       error?: string;
-    };
+    }>(url, 'load TON wallet balance');
 
     if (!payload.ok || !payload.result) {
       throw new InternalServerErrorException(
@@ -557,32 +549,55 @@ export class CasesService implements OnModuleInit {
       };
     }
 
-      try {
-        const matchingTransaction = await this.findMatchingTransaction(paymentIntent);
+    try {
+      const matchingTransaction = await this.findMatchingTransaction(paymentIntent);
 
       if (!matchingTransaction) {
         return paymentIntent;
       }
 
-      await this.prisma.casePaymentIntent.update({
-        where: { id: paymentIntent.id },
-        data: {
-          status: CasePaymentStatus.CONFIRMED,
-          transactionHash: matchingTransaction.hash ?? null,
-          transactionLt: matchingTransaction.lt ?? null,
-          confirmedAt: new Date(),
-        },
-      });
+      const resolvedIntent = await this.prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`
+          SELECT "id"
+          FROM "CasePaymentIntent"
+          WHERE "id" = ${paymentIntent.id}
+          FOR UPDATE
+        `;
 
-      const existingOpening = await this.prisma.caseOpening.findUnique({
-        where: {
-          paymentIntentId: paymentIntent.id,
-        },
-      });
+        const currentIntent = await tx.casePaymentIntent.findUnique({
+          where: { id: paymentIntent.id },
+          include: {
+            opening: {
+              include: {
+                case: true,
+                caseDrop: {
+                  include: {
+                    giftType: true,
+                  },
+                },
+                giftType: true,
+              },
+            },
+          },
+        });
 
-        if (!existingOpening) {
-          const caseItem = await this.prisma.caseDefinition.findUnique({
-          where: { id: paymentIntent.caseId },
+        if (!currentIntent) {
+          throw new NotFoundException('Payment intent not found');
+        }
+
+        if (currentIntent.opening) {
+          return currentIntent;
+        }
+
+        if (
+          currentIntent.status === CasePaymentStatus.EXPIRED ||
+          currentIntent.status === CasePaymentStatus.FAILED
+        ) {
+          return currentIntent;
+        }
+
+        const caseItem = await tx.caseDefinition.findUnique({
+          where: { id: currentIntent.caseId },
           include: {
             drops: {
               include: {
@@ -602,31 +617,70 @@ export class CasesService implements OnModuleInit {
         }
 
         const winningDrop = pickWeightedDrop(caseItem.drops);
+        const confirmedAt = currentIntent.confirmedAt ?? new Date();
 
-          const opening = await this.prisma.caseOpening.create({
-            data: {
-              userId: paymentIntent.userId,
-              caseId: caseItem.id,
-              caseDropId: winningDrop.id,
-              giftTypeId: winningDrop.giftType.id,
-              paymentIntentId: paymentIntent.id,
-            },
-          });
+        await tx.casePaymentIntent.update({
+          where: { id: paymentIntent.id },
+          data: {
+            status: CasePaymentStatus.CONFIRMED,
+            transactionHash: matchingTransaction.hash ?? null,
+            transactionLt: matchingTransaction.lt ?? null,
+            confirmedAt,
+          },
+        });
 
-          await this.auditService.write({
-            userId: paymentIntent.userId,
+        const opening = await tx.caseOpening.create({
+          data: {
+            userId: currentIntent.userId,
+            caseId: caseItem.id,
+            caseDropId: winningDrop.id,
+            giftTypeId: winningDrop.giftType.id,
+            paymentIntentId: currentIntent.id,
+          },
+        });
+
+        await this.auditService.write(
+          {
+            userId: currentIntent.userId,
             action: 'cases.payment.confirmed',
             entityType: 'case_payment_intent',
-            entityId: paymentIntent.id,
+            entityId: currentIntent.id,
             metadata: {
               caseId: caseItem.id,
               caseSlug: caseItem.slug,
               openingId: opening.id,
               giftTypeId: winningDrop.giftType.id,
             },
-          });
+          },
+          tx,
+        );
+
+        const refreshedIntent = await tx.casePaymentIntent.findUnique({
+          where: { id: currentIntent.id },
+          include: {
+            opening: {
+              include: {
+                case: true,
+                caseDrop: {
+                  include: {
+                    giftType: true,
+                  },
+                },
+                giftType: true,
+              },
+            },
+          },
+        });
+
+        if (!refreshedIntent) {
+          throw new NotFoundException('Payment intent not found');
         }
-      } catch (error) {
+
+        return refreshedIntent;
+      });
+
+      return resolvedIntent;
+    } catch (error) {
       this.logger.warn(
         `TON payment verification for ${paymentIntent.id} failed: ${
           error instanceof Error ? error.message : 'Unknown error'
@@ -853,17 +907,9 @@ export class CasesService implements OnModuleInit {
     );
     url.searchParams.set('sort', 'desc');
 
-    const response = await fetch(url, {
-      headers: this.getTonCenterHeaders(),
-    });
-
-    if (!response.ok) {
-      throw new Error(`TON Center verification failed with status ${response.status}`);
-    }
-
-    const payload = (await response.json()) as {
+    const payload = await this.fetchTonCenterJson<{
       transactions?: TonCenterTransaction[];
-    };
+    }>(url, `verify TON payment ${paymentIntent.id}`);
 
     const transactions = payload.transactions ?? [];
 
@@ -968,6 +1014,40 @@ export class CasesService implements OnModuleInit {
 
     return apiKey ? { 'X-API-Key': apiKey } : undefined;
   }
+
+  private async fetchTonCenterJson<T>(url: URL, action: string) {
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= TONCENTER_REQUEST_ATTEMPTS; attempt += 1) {
+      try {
+        const response = await fetch(url, {
+          headers: this.getTonCenterHeaders(),
+          signal: AbortSignal.timeout(TONCENTER_REQUEST_TIMEOUT_MS),
+        });
+
+        if (!response.ok) {
+          throw new Error(`TON Center returned ${response.status}`);
+        }
+
+        return (await response.json()) as T;
+      } catch (error) {
+        lastError = error;
+
+        if (attempt >= TONCENTER_REQUEST_ATTEMPTS) {
+          break;
+        }
+
+        await delay(200 * attempt);
+      }
+    }
+
+    const reason =
+      lastError instanceof Error ? lastError.message : 'Unknown network error';
+
+    throw new InternalServerErrorException(
+      `Failed to ${action}: ${reason}`,
+    );
+  }
 }
 
 type TonCenterTransaction = {
@@ -984,6 +1064,13 @@ type TonCenterTransaction = {
 
 function pickWeightedDrop(drops: CaseRecord['drops']) {
   const totalChance = drops.reduce((sum, drop) => sum + drop.chance, 0);
+
+  if (totalChance <= 0) {
+    throw new InternalServerErrorException(
+      'Case drop chances must add up to a positive value',
+    );
+  }
+
   let random = randomInt(totalChance);
 
   for (const drop of drops) {
@@ -1023,4 +1110,8 @@ function formatTonAmount(balanceNano: string) {
   }
 
   return `${whole}.${fraction.toString().padStart(9, '0').replace(/0+$/, '')}`;
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

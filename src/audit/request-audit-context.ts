@@ -23,12 +23,6 @@ export function createAuditContext(
 }
 
 function getRequestIp(request: RequestLike) {
-  const forwarded = getFirstHeaderValue(request.headers['x-forwarded-for']);
-
-  if (forwarded) {
-    return forwarded.split(',')[0]?.trim() ?? null;
-  }
-
   return request.ip ?? request.socket?.remoteAddress ?? null;
 }
 

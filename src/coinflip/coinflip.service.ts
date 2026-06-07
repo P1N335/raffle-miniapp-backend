@@ -366,6 +366,13 @@ export class CoinflipService {
       });
 
       const totalPotTon = room.creatorTotalTon + opponentTotalTon;
+
+      if (totalPotTon <= 0) {
+        throw new BadRequestException(
+          'CoinFlip requires gifts with a positive TON value',
+        );
+      }
+
       const creatorWins = randomInt(totalPotTon) < room.creatorTotalTon;
       const winnerUserId = creatorWins ? room.creatorUserId : userId;
 
@@ -490,6 +497,12 @@ export class CoinflipService {
 
     if (openings.length !== openingIds.length) {
       throw new BadRequestException('Some selected gifts are unavailable');
+    }
+
+    if (openings.some((opening) => opening.giftType.estimatedValueTon <= 0)) {
+      throw new BadRequestException(
+        'Selected gifts must have a positive TON value',
+      );
     }
 
     return openingIds.map((openingId) => {
